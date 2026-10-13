@@ -88,6 +88,25 @@ func writeFile(out *tar.Writer, file *files.Content) (int64, error) {
 	return size, nil
 }
 
+// writeHardlink writes a payload-less hard link entry pointing at another
+// in-package file. opkg creates the link on installation.
+func writeHardlink(out *tar.Writer, file *files.Content) error {
+	header := &tar.Header{
+		Name:     files.AsExplicitRelativePath(file.Destination),
+		Linkname: files.AsRelativePath(file.Source),
+		Typeflag: tar.TypeLink,
+		Format:   tar.FormatGNU,
+		Mode:     normalizeIPKFileMode(file.Mode()),
+		ModTime:  file.FileInfo.MTime,
+		Uname:    file.FileInfo.Owner,
+		Gname:    file.FileInfo.Group,
+	}
+	if err := out.WriteHeader(header); err != nil {
+		return fmt.Errorf("cannot write hardlink header for %s to archive: %w", file.Destination, err)
+	}
+	return nil
+}
+
 // writeToFile writes a file to the tarball where the contents are an array of bytes.
 func writeToFile(out *tar.Writer, filename string, content []byte, mtime time.Time) error {
 	header := tar.Header{

@@ -53,6 +53,8 @@ func addContents(b rpm.PackageBuilder, info *nfpm.Info) error {
 			err = addRegularFile(b, content, dest, rpm.ReadmeFile)
 		case files.TypeSymlink:
 			addSymlink(b, content, dest)
+		case files.TypeHardlink:
+			err = addHardlink(b, content, dest)
 		case files.TypeDir:
 			addDirectory(b, content, dest, mtime)
 		case files.TypeImplicitDir:
@@ -161,6 +163,24 @@ func addSymlink(b rpm.PackageBuilder, content *files.Content, dest string) {
 		WithOwner(content.FileInfo.Owner).
 		WithGroup(content.FileInfo.Group).
 		Add()
+}
+
+// addHardlink registers an additional name for another payload entry. The
+// library stores the payload once and emits shared FILEDEVICES/FILEINODES, a
+// zero FILESIZE/digest on the link, and an empty cpio record, which is what rpm
+// turns into an on-disk hard link on installation.
+func addHardlink(b rpm.PackageBuilder, content *files.Content, dest string) error {
+	fb := b.File(dest).
+		WithHardLink(files.ToNixPath(content.Source)).
+		WithMode(normalizeFileMode(content.FileInfo.Mode)).
+		WithMTime(uint32(content.FileInfo.MTime.Unix())).
+		WithOwner(content.FileInfo.Owner).
+		WithGroup(content.FileInfo.Group)
+	if content.FileInfo.Lang != "" {
+		fb.WithLang(content.FileInfo.Lang)
+	}
+	fb.Add()
+	return nil
 }
 
 func addDirectory(b rpm.PackageBuilder, content *files.Content, dest string, mtime time.Time) {

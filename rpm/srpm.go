@@ -159,6 +159,19 @@ func addTarEntry(tw *tar.Writer, content *files.Content, mtime time.Time) error 
 			Uname:    owner,
 			Gname:    group,
 		})
+	case files.TypeHardlink:
+		// The source tarball carries the same link relationship: tar -xf in
+		// %install creates the hard link in the buildroot, and rpmbuild then
+		// derives the shared device/inode metadata of the rebuilt binary RPM.
+		return tw.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeLink,
+			Name:     name,
+			Linkname: strings.TrimPrefix(files.ToNixPath(content.Source), "/"),
+			Mode:     int64(normalizeFileMode(content.Mode())),
+			ModTime:  content.FileInfo.MTime,
+			Uname:    owner,
+			Gname:    group,
+		})
 	case files.TypeDir:
 		return tw.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeDir,

@@ -433,6 +433,8 @@ func createFilesInsideTarGz(info *nfpm.Info, tw *tar.Writer, sizep *int64) (err 
 				Typeflag: tar.TypeSymlink,
 				ModTime:  file.FileInfo.MTime,
 			})
+		case files.TypeHardlink:
+			err = writeHardlinkInsideTarGz(tw, file)
 		default:
 			err = copyToTarAndDigest(file, tw, sizep)
 		}
@@ -441,6 +443,28 @@ func createFilesInsideTarGz(info *nfpm.Info, tw *tar.Writer, sizep *int64) (err 
 		}
 	}
 
+	return nil
+}
+
+// writeHardlinkInsideTarGz writes a payload-less tar hard link entry pointing
+// at another in-package file. It carries no APK-TOOLS.checksum PAX record of
+// its own (the data exists once under the target name) and is not counted into
+// the installed size again. file.Destination has already been made relative by
+// the caller; the in-package target in file.Source is converted here.
+func writeHardlinkInsideTarGz(tw *tar.Writer, file *files.Content) error {
+	header := &tar.Header{
+		Name:     file.Destination,
+		Linkname: files.AsRelativePath(file.Source),
+		Typeflag: tar.TypeLink,
+		Mode:     int64(normalizeFileMode(file.FileInfo.Mode)),
+		Uname:    file.FileInfo.Owner,
+		Gname:    file.FileInfo.Group,
+		ModTime:  file.FileInfo.MTime,
+		Format:   tar.FormatPAX,
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("cannot write hardlink header for %s: %w", file.Destination, err)
+	}
 	return nil
 }
 

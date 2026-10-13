@@ -238,6 +238,8 @@ func populateDataTar(info *nfpm.Info, tw *tar.Writer) (instSize int64, err error
 					Linkname: file.Source,
 				},
 			)
+		case files.TypeHardlink:
+			err = writeHardlink(tw, file)
 		case files.TypeFile, files.TypeTree, files.TypeConfig, files.TypeConfigNoReplace, files.TypeConfigMissingOK:
 			size, err = writeFile(tw, file)
 		default:

@@ -25,6 +25,10 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5
 )
 
+// Local fork of go.digitalxero.dev/rpm adding payload hard link support
+// (FileBuilder.WithHardLink). Kept in sync with upstream v0.3.4 otherwise.
+replace go.digitalxero.dev/rpm => ./internal/rpmlib
+
 require (
 	charm.land/lipgloss/v2 v2.0.4 // indirect
 	github.com/DataDog/zstd v1.5.7 // indirect

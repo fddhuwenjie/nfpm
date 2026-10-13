@@ -251,6 +251,9 @@ func addContents(builder msix.Builder, info *nfpm.Info) {
 		case files.TypeSymlink:
 			log.Printf("warning: msix does not support symlinks, skipping %s", content.Destination)
 			continue
+		case files.TypeHardlink:
+			log.Printf("warning: msix does not support hard links, skipping %s", content.Destination)
+			continue
 		default:
 			// Treat everything else (TypeFile, TypeConfig, etc.) as regular files.
 			// AddFile defers errors to Build, so they surface from builder.Build.

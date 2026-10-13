@@ -468,6 +468,12 @@ func createFilesInsideDataTar(info *nfpm.Info, tw *tar.Writer) (md5buf bytes.Buf
 				return md5buf, 0, fmt.Errorf("create symlink %q in data tar: %w",
 					header.Linkname, err)
 			}
+		case files.TypeHardlink:
+			err = createHardlinkInsideDataTar(tw, file, info.MTime)
+			if err != nil {
+				return md5buf, 0, fmt.Errorf("create hardlink %q in data tar: %w",
+					file.Destination, err)
+			}
 		case files.TypeDebChangelog:
 			size, err := createChangelogInsideDataTar(tw, &md5buf, info, file.Destination)
 			if err != nil {
@@ -486,6 +492,27 @@ func createFilesInsideDataTar(info *nfpm.Info, tw *tar.Writer) (md5buf bytes.Buf
 	}
 
 	return md5buf, instSize, nil
+}
+
+// createHardlinkInsideDataTar writes a tar hard link entry for file: it carries
+// no payload, only a TypeLink header whose Linkname points at the in-package
+// target (relative, without the leading dot). dpkg links both names to the
+// same inode on installation.
+func createHardlinkInsideDataTar(tw *tar.Writer, file *files.Content, preferredModTimes ...time.Time) error {
+	header, err := tarHeader(file, preferredModTimes...)
+	if err != nil {
+		return err
+	}
+
+	header.Typeflag = tar.TypeLink
+	header.Size = 0
+	header.Name = files.AsRelativePath(file.Destination)
+	header.Linkname = files.AsRelativePath(file.Source)
+
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("cannot write hardlink header for %s: %w", file.Destination, err)
+	}
+	return nil
 }
 
 func copyToTarAndDigest(file *files.Content, tw *tar.Writer, md5w io.Writer) (int64, error) {

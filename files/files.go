@@ -1,6 +1,7 @@
 package files
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -28,6 +29,14 @@ const (
 	// TypeSymlink is the type of a symlink that is created at the destination
 	// path and points to the source path.
 	TypeSymlink = "symlink"
+	// TypeHardlink is the type of a hard link that is created at the
+	// destination path. Unlike every other content type, its source is not a
+	// path on the build host but the absolute in-package destination of another
+	// regular file that is packaged as well. The link does not carry a second
+	// copy of the payload: after installation all paths of the group reference
+	// the same on-disk inode. Each path is still created on its own, so parent
+	// directories, permissions and ownership are handled per destination.
+	TypeHardlink = "hardlink"
 	// TypeConfig is the type of a configuration file that may be changed by the
 	// user of the package.
 	TypeConfig = "config"
@@ -70,7 +79,7 @@ const (
 type Content struct {
 	Source        string           `yaml:"src,omitempty" json:"src,omitempty"`
 	Destination   string           `yaml:"dst" json:"dst"`
-	Type          string           `yaml:"type,omitempty" json:"type,omitempty" jsonschema:"enum=symlink,enum=ghost,enum=config,enum=config|noreplace,enum=config|missingok,enum=doc,enum=license,enum=licence,enum=readme,enum=dir,enum=tree,enum=config|tree,enum=config|noreplace|tree,enum=config|missingok|tree,enum=,default="`
+	Type          string           `yaml:"type,omitempty" json:"type,omitempty" jsonschema:"enum=symlink,enum=hardlink,enum=ghost,enum=config,enum=config|noreplace,enum=config|missingok,enum=doc,enum=license,enum=licence,enum=readme,enum=dir,enum=tree,enum=config|tree,enum=config|noreplace|tree,enum=config|missingok|tree,enum=,default="`
 	Packager      string           `yaml:"packager,omitempty" json:"packager,omitempty"`
 	FileInfo      *ContentFileInfo `yaml:"file_info,omitempty" json:"file_info,omitempty"`
 	Expand        bool             `yaml:"expand,omitempty" json:"expand,omitempty"`
@@ -306,6 +315,34 @@ func PrepareForPackager(
 			cc.Source = ToNixPath(cc.Source)
 			cc.Destination = NormalizeAbsoluteFilePath(cc.Destination)
 			contentMap[cc.Destination] = cc
+		case TypeHardlink:
+			destination := NormalizeAbsoluteFilePath(content.Destination)
+
+			presentContent, destinationOccupied := contentMap[destination]
+			if destinationOccupied {
+				return nil, contentCollisionError(content, presentContent)
+			}
+
+			if err := addParents(contentMap, content.Destination, mtime, content.FileInfo); err != nil {
+				return nil, err
+			}
+
+			// The source of a hard link is a virtual in-package destination,
+			// never a path on the build host: blank it while deriving defaults
+			// so no host file system metadata leaks into the entry.
+			probe := *content
+			probe.Source = ""
+			cc := probe.WithFileInfoDefaults(umask, mtime)
+			cc.Type = TypeHardlink
+			// detach the file info before any default is inherited from the
+			// target below, so caller-provided structs are never mutated
+			if cc.FileInfo != nil {
+				fileInfo := *cc.FileInfo
+				cc.FileInfo = &fileInfo
+			}
+			cc.Source = NormalizeAbsoluteFilePath(content.Source)
+			cc.Destination = destination
+			contentMap[destination] = cc
 		case TypeTree:
 			if err := addTree(contentMap, content, umask, mtime, TypeFile); err != nil {
 				return nil, fmt.Errorf("add tree: %w", err)
@@ -340,6 +377,10 @@ func PrepareForPackager(
 		}
 	}
 
+	if err := validateHardlinks(contentMap); err != nil {
+		return nil, err
+	}
+
 	res := make(Contents, 0, len(contentMap))
 
 	for _, content := range contentMap {
@@ -348,7 +389,148 @@ func PrepareForPackager(
 
 	sort.Sort(res)
 
+	// Move every hard link behind its payload target so archive streams (tar
+	// and cpio) always contain the data before the link header. Without any
+	// hard links the order stays exactly the sorted one.
+	res = orderHardlinks(res)
+
 	return res, nil
+}
+
+// Hard link validation errors. They are wrapped with the offending destinations
+// by validateHardlinks, so callers can errors.Is the concrete failure kind.
+var (
+	// ErrHardlinkTargetMissing is returned when a hard link's source does not
+	// name another destination that is part of the package.
+	ErrHardlinkTargetMissing = errors.New("hardlink target is not packaged")
+	// ErrHardlinkSelf is returned when a hard link declares itself as its own
+	// target.
+	ErrHardlinkSelf = errors.New("hard link cannot point at itself")
+	// ErrHardlinkCycle is returned when hard links reference each other in a
+	// cycle instead of terminating at a regular file.
+	ErrHardlinkCycle = errors.New("hardlink cycle detected")
+	// ErrHardlinkTargetType is returned when the target exists but cannot be
+	// hard-linked (a directory, a symbolic link, a ghost file, ...).
+	ErrHardlinkTargetType = errors.New("hardlink target has an unsupported content type")
+)
+
+// validateHardlinks resolves every hard link declaration in the prepared
+// content map: the chain of links must terminate at a packaged regular file,
+// must not reference itself or form a cycle, and missing links are filled in
+// with the terminal target's mode when no explicit mode was configured.
+func validateHardlinks(contentMap map[string]*Content) error {
+	linkNames := make([]string, 0)
+	for destination, content := range contentMap {
+		if content.Type == TypeHardlink {
+			linkNames = append(linkNames, destination)
+		}
+	}
+	sort.Strings(linkNames)
+
+	for _, linkName := range linkNames {
+		link := contentMap[linkName]
+
+		if link.Source == link.Destination {
+			return fmt.Errorf("hardlink %q: %w", link.Destination, ErrHardlinkSelf)
+		}
+
+		visited := map[string]bool{link.Destination: true}
+		current := link.Source
+		for {
+			target, present := contentMap[current]
+			if !present {
+				// directories are keyed with a trailing slash, so a link that
+				// names a directory is reported as a bad target type instead
+				// of a missing target
+				target, present = contentMap[NormalizeAbsoluteDirPath(current)]
+			}
+			if !present {
+				return fmt.Errorf("hardlink %q: target %q: %w", link.Destination, current, ErrHardlinkTargetMissing)
+			}
+			if visited[current] {
+				return fmt.Errorf("hardlink %q: %w", link.Destination, ErrHardlinkCycle)
+			}
+			visited[current] = true
+
+			if target.Type != TypeHardlink {
+				if !canBeHardlinkTarget(target.Type) {
+					return fmt.Errorf(
+						"hardlink %q: target %q is %s: %w",
+						link.Destination, current, target.Type, ErrHardlinkTargetType,
+					)
+				}
+				break
+			}
+			current = target.Source
+		}
+
+		// Hard links share inode metadata on disk; an entry without an explicit
+		// mode inherits the terminal target's mode instead of shipping a zero
+		// mode. Explicit ownership and mtime configured on the link are kept.
+		if link.FileInfo != nil && link.FileInfo.Mode == 0 {
+			terminal := contentMap[current]
+			if terminal.FileInfo != nil && terminal.FileInfo.Mode != 0 {
+				link.FileInfo.Mode = terminal.FileInfo.Mode
+			}
+		}
+	}
+
+	return nil
+}
+
+// canBeHardlinkTarget reports whether content of the given type carries a
+// regular payload that additional links can share.
+func canBeHardlinkTarget(contentType string) bool {
+	switch contentType {
+	case TypeFile,
+		TypeConfig,
+		TypeConfigNoReplace,
+		TypeConfigMissingOK,
+		TypeRPMDoc,
+		TypeRPMLicence,
+		TypeRPMLicense,
+		TypeRPMReadme,
+		TypeDebChangelog:
+		return true
+	default:
+		return false
+	}
+}
+
+// orderHardlinks performs a stable topological reordering: a hard link entry
+// is emitted after the entry carrying its payload, chains are followed
+// transitively, and all other entries keep their incoming relative order.
+func orderHardlinks(contents Contents) Contents {
+	indexByDestination := make(map[string]int, len(contents))
+	for i, content := range contents {
+		indexByDestination[content.Destination] = i
+	}
+
+	emitted := make([]bool, len(contents))
+	ordered := make(Contents, 0, len(contents))
+
+	var visit func(int)
+	visit = func(i int) {
+		if emitted[i] {
+			return
+		}
+		emitted[i] = true
+
+		content := contents[i]
+		if content.Type == TypeHardlink {
+			if targetIndex, present := indexByDestination[content.Source]; present {
+				visit(targetIndex)
+			}
+		}
+
+		ordered = append(ordered, content)
+	}
+
+	for i := range contents {
+		visit(i)
+	}
+
+	return ordered
 }
 
 func isRelevantForPackager(packager string, content *Content) bool {

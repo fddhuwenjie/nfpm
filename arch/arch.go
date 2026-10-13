@@ -212,6 +212,27 @@ func createFilesInTar(info *nfpm.Info, tw *tar.Writer) ([]MtreeEntry, int64, err
 				Mode:        0o777,
 				Type:        content.Type,
 			})
+		case files.TypeHardlink:
+			linkSource := files.AsRelativePath(content.Source)
+			if err := tw.WriteHeader(&tar.Header{
+				Name:     content.Destination,
+				Linkname: linkSource,
+				Mode:     int64(content.Mode()),
+				ModTime:  content.ModTime(),
+				Uname:    content.FileInfo.Owner,
+				Gname:    content.FileInfo.Group,
+				Typeflag: tar.TypeLink,
+			}); err != nil {
+				return nil, 0, err
+			}
+
+			entries = append(entries, MtreeEntry{
+				LinkSource:  linkSource,
+				Destination: content.Destination,
+				Time:        content.ModTime().Unix(),
+				Mode:        int64(content.Mode()),
+				Type:        content.Type,
+			})
 		default:
 			src, err := os.Open(content.Source)
 			if err != nil {
@@ -471,6 +492,18 @@ func (me *MtreeEntry) WriteTo(w io.Writer) (int64, error) {
 		n, err := fmt.Fprintf(
 			w,
 			"./%s time=%d.0 mode=%o type=link link=%s\n",
+			me.Destination,
+			me.Time,
+			me.Mode,
+			me.LinkSource,
+		)
+		return int64(n), err
+	case files.TypeHardlink:
+		// mtree represents hard links as type=file with a link keyword and
+		// without size/digests: the payload is owned by the link target.
+		n, err := fmt.Fprintf(
+			w,
+			"./%s time=%d.0 mode=%o type=file link=./%s\n",
 			me.Destination,
 			me.Time,
 			me.Mode,
